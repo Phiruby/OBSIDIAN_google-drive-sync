@@ -1,0 +1,11 @@
+{
+	"id": "google-drive-free-sync",
+	"name": "Google Drive Free Sync",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Sync your Obsidian vault with Google Drive for free.",
+	"author": "Obsidian",
+	"authorUrl": "https://obsidian.md",
+	"fundingUrl": "https://obsidian.md/pricing",
+	"isDesktopOnly": false
+}
