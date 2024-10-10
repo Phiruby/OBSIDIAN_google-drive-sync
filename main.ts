@@ -3,17 +3,21 @@ import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import * as path from 'path';
 import { GaxiosPromise } from 'gaxios';
+import * as fs from 'fs';
+import { moment } from 'obsidian';
 
 interface MyPluginSettings {
 	googleDriveClientId: string;
 	googleDriveClientSecret: string;
 	googleDriveRefreshToken: string;
+	lastSyncTimestamp: number | null;
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
 	googleDriveClientId: process.env.GOOGLE_DRIVE_CLIENT_ID!,  // Replace with your Google Client ID
 	googleDriveClientSecret: process.env.GOOGLE_DRIVE_CLIENT_SECRET!,  // Replace with your Google Client Secret
 	googleDriveRefreshToken: '',
+	lastSyncTimestamp: null,
 }
 
 export default class MyPlugin extends Plugin {
@@ -21,6 +25,7 @@ export default class MyPlugin extends Plugin {
 	oauth2Client: OAuth2Client;
 	private obsidianFolderId: string | null = null;
 	private drivefolderIds: { [path: string]: string } = {};
+	private fileIds: { [path: string]: string } = {};
 
 	async onload() {
 		await this.loadSettings();
@@ -52,9 +57,14 @@ export default class MyPlugin extends Plugin {
 
 		// Add a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new GoogleDriveSettingTab(this.app, this));
+
+		// Load file IDs from storage
+		this.fileIds = Object.assign({}, await this.loadData('fileIds') || {});
 	}
 
-	onunload() {}
+	async onunload() {
+		await this.saveData('fileIds', this.fileIds);
+	}
 
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -137,6 +147,14 @@ export default class MyPlugin extends Plugin {
 			this.drivefolderIds = {}; // Reset the folder ID cache
 			await this.ensureObsidianFolder();
 			await this.uploadVaultContents();
+			
+			// Update last sync timestamp
+			this.settings.lastSyncTimestamp = Date.now();
+			await this.saveSettings();
+
+			// Save file IDs to storage
+			await this.saveData('fileIds', this.fileIds);
+
 			new Notice('Sync complete!');
 		} catch (error) {
 			console.error('Error syncing with Google Drive:', error);
@@ -241,12 +259,27 @@ export default class MyPlugin extends Plugin {
 
 	// Upload an Obsidian file to Google Drive
 	async uploadObsidianFile(file: TFile, currentPath: string) {
-		const content = await this.app.vault.read(file);
 		const fileName = file.name;
 		const mimeType = this.getMimeType(file.extension);
 		const filePath = path.join(currentPath, fileName);
 
-		await this.uploadFile(filePath, content, mimeType);
+		// Check if file has been modified since last sync or if it's the first sync
+		if (this.settings.lastSyncTimestamp !== null && file.stat.mtime <= this.settings.lastSyncTimestamp) {
+			console.log(`Skipping ${filePath} - not modified since last sync`);
+			return;
+		}
+
+		let content: string | ArrayBuffer;
+		if (mimeType.startsWith('text/') || mimeType === 'application/json') {
+			content = await this.app.vault.read(file);
+		} else {
+			content = await this.app.vault.readBinary(file);
+		}
+
+		const fileId = await this.uploadFile(filePath, content, mimeType);
+		if (fileId) {
+			this.fileIds[filePath] = fileId;
+		}
 	}
 
 	// Upload a file to Google Drive
@@ -264,12 +297,25 @@ export default class MyPlugin extends Plugin {
 		const media = { mimeType, body: content };
 
 		try {
-			const file = await drive.files.create({
-				requestBody: fileMetadata,
-				media: media,
-				fields: 'id',
-			});
-			console.log(`File uploaded: ${filePath}, ID: ${file.data.id}`);
+			let file;
+			if (this.fileIds[filePath]) {
+				// Update existing file
+				file = await drive.files.update({
+					fileId: this.fileIds[filePath],
+					requestBody: fileMetadata,
+					media: media,
+					fields: 'id',
+				});
+				console.log(`File updated: ${filePath}, ID: ${file.data.id}`);
+			} else {
+				// Create new file
+				file = await drive.files.create({
+					requestBody: fileMetadata,
+					media: media,
+					fields: 'id',
+				});
+				console.log(`File created: ${filePath}, ID: ${file.data.id}`);
+			}
 			return file.data.id;
 		} catch (err) {
 			console.error(`Error uploading file ${filePath}:`, err);
@@ -283,10 +329,14 @@ export default class MyPlugin extends Plugin {
 			case 'md':
 				return 'text/markdown';
 			case 'png':
+				return 'image/png';
 			case 'jpg':
 			case 'jpeg':
+				return 'image/jpeg';
 			case 'gif':
-				return `image/${extension.toLowerCase()}`;
+				return 'image/gif';
+			case 'json':
+				return 'application/json';
 			default:
 				return 'application/octet-stream';
 		}
