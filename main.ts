@@ -59,11 +59,15 @@ export default class MyPlugin extends Plugin {
 		this.addSettingTab(new GoogleDriveSettingTab(this.app, this));
 
 		// Load file IDs from storage
-		this.fileIds = Object.assign({}, await this.loadData('fileIds') || {});
+		const data = await this.loadData();
+		this.fileIds = data?.fileIds || {};
+		if (data?.lastSyncTimestamp) {
+			this.settings.lastSyncTimestamp = data.lastSyncTimestamp;
+		}
 	}
 
 	async onunload() {
-		await this.saveData('fileIds', this.fileIds);
+		await this.savePluginData();
 	}
 
 	async loadSettings() {
@@ -150,10 +154,7 @@ export default class MyPlugin extends Plugin {
 			
 			// Update last sync timestamp
 			this.settings.lastSyncTimestamp = Date.now();
-			await this.saveSettings();
-
-			// Save file IDs to storage
-			await this.saveData('fileIds', this.fileIds);
+			await this.savePluginData();
 
 			new Notice('Sync complete!');
 		} catch (error) {
@@ -270,20 +271,27 @@ export default class MyPlugin extends Plugin {
 		}
 
 		let content: string | ArrayBuffer;
-		if (mimeType.startsWith('text/') || mimeType === 'application/json') {
-			content = await this.app.vault.read(file);
-		} else {
-			content = await this.app.vault.readBinary(file);
-		}
-
-		const fileId = this.fileIds[filePath];
-		if (fileId) {
-			await this.updateFile(fileId, filePath, content, mimeType);
-		} else {
-			const newFileId = await this.createFile(filePath, content, mimeType);
-			if (newFileId) {
-				this.fileIds[filePath] = newFileId;
+		try {
+			if (mimeType.startsWith('image/') || mimeType === 'application/octet-stream') {
+				// For image files and unknown binary files, read as ArrayBuffer
+				content = await this.app.vault.readBinary(file);
+			} else {
+				// For text files, read as string
+				content = await this.app.vault.read(file);
 			}
+
+			const fileId = this.fileIds[filePath];
+			if (fileId) {
+				await this.updateFile(fileId, filePath, content, mimeType);
+			} else {
+				const newFileId = await this.createFile(filePath, content, mimeType);
+				if (newFileId) {
+					this.fileIds[filePath] = newFileId;
+				}
+			}
+		} catch (error) {
+			console.error(`Error reading file ${filePath}:`, error);
+			new Notice(`Failed to upload ${fileName}. See console for details.`);
 		}
 	}
 
@@ -295,15 +303,19 @@ export default class MyPlugin extends Plugin {
 
 		const parentId = await this.ensureDriveFolder(parentPath);
 
-		const fileMetadata = {
+		const requestBody = {
 			name: fileName,
 			parents: [parentId],
 		};
-		const media = { mimeType, body: content };
+
+		const media = {
+			mimeType: mimeType,
+			body: content instanceof ArrayBuffer ? Buffer.from(content) : content,
+		};
 
 		try {
 			const file = await drive.files.create({
-				requestBody: fileMetadata,
+				requestBody: requestBody,
 				media: media,
 				fields: 'id',
 			});
@@ -323,7 +335,10 @@ export default class MyPlugin extends Plugin {
 		const fileMetadata = {
 			name: fileName,
 		};
-		const media = { mimeType, body: content };
+		const media = {
+			mimeType: mimeType,
+			body: content instanceof ArrayBuffer ? Buffer.from(content) : content,
+		};
 
 		try {
 			await drive.files.update({
@@ -355,6 +370,17 @@ export default class MyPlugin extends Plugin {
 			default:
 				return 'application/octet-stream';
 		}
+	}
+
+	// New method to save plugin data
+	async savePluginData() {
+		const data = await this.loadData();
+		const updatedData = {
+			...data,
+			fileIds: this.fileIds,
+			lastSyncTimestamp: this.settings.lastSyncTimestamp
+		};
+		await this.saveData(updatedData);
 	}
 }
 
