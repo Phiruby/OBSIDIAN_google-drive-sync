@@ -276,14 +276,19 @@ export default class MyPlugin extends Plugin {
 			content = await this.app.vault.readBinary(file);
 		}
 
-		const fileId = await this.uploadFile(filePath, content, mimeType);
+		const fileId = this.fileIds[filePath];
 		if (fileId) {
-			this.fileIds[filePath] = fileId;
+			await this.updateFile(fileId, filePath, content, mimeType);
+		} else {
+			const newFileId = await this.createFile(filePath, content, mimeType);
+			if (newFileId) {
+				this.fileIds[filePath] = newFileId;
+			}
 		}
 	}
 
-	// Upload a file to Google Drive
-	async uploadFile(filePath: string, content: string | ArrayBuffer, mimeType: string): Promise<string | null> {
+	// Create a new file in Google Drive
+	async createFile(filePath: string, content: string | ArrayBuffer, mimeType: string): Promise<string | null> {
 		const drive = google.drive({ version: 'v3', auth: this.oauth2Client });
 		const parentPath = path.dirname(filePath);
 		const fileName = path.basename(filePath);
@@ -297,29 +302,39 @@ export default class MyPlugin extends Plugin {
 		const media = { mimeType, body: content };
 
 		try {
-			let file;
-			if (this.fileIds[filePath]) {
-				// Update existing file
-				file = await drive.files.update({
-					fileId: this.fileIds[filePath],
-					requestBody: fileMetadata,
-					media: media,
-					fields: 'id',
-				});
-				console.log(`File updated: ${filePath}, ID: ${file.data.id}`);
-			} else {
-				// Create new file
-				file = await drive.files.create({
-					requestBody: fileMetadata,
-					media: media,
-					fields: 'id',
-				});
-				console.log(`File created: ${filePath}, ID: ${file.data.id}`);
-			}
+			const file = await drive.files.create({
+				requestBody: fileMetadata,
+				media: media,
+				fields: 'id',
+			});
+			console.log(`File created: ${filePath}, ID: ${file.data.id}`);
 			return file.data.id;
 		} catch (err) {
-			console.error(`Error uploading file ${filePath}:`, err);
+			console.error(`Error creating file ${filePath}:`, err);
 			return null;
+		}
+	}
+
+	// Update an existing file in Google Drive
+	async updateFile(fileId: string, filePath: string, content: string | ArrayBuffer, mimeType: string): Promise<void> {
+		const drive = google.drive({ version: 'v3', auth: this.oauth2Client });
+		const fileName = path.basename(filePath);
+
+		const fileMetadata = {
+			name: fileName,
+		};
+		const media = { mimeType, body: content };
+
+		try {
+			await drive.files.update({
+				fileId: fileId,
+				requestBody: fileMetadata,
+				media: media,
+				fields: 'id',
+			});
+			console.log(`File updated: ${filePath}, ID: ${fileId}`);
+		} catch (err) {
+			console.error(`Error updating file ${filePath}:`, err);
 		}
 	}
 
